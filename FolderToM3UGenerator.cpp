@@ -9,6 +9,7 @@
 #include <map>
 #include <regex>
 #include <sstream>
+#include <conio.h> // For _getch()
 
 namespace fs = std::filesystem;
 
@@ -19,30 +20,6 @@ bool isAudioVideoFile(const std::string& extension);
 std::string getCurrentDateTime();
 void generatePlaylist(const std::string& exeName, const fs::path& currentPath);
 std::string wideStringToString(const std::wstring& wstr);
-
-int main() {
-    try {
-        WCHAR exePath[MAX_PATH];
-        GetModuleFileNameW(NULL, exePath, MAX_PATH);
-        fs::path fullExePath(exePath);
-        std::string exeName = wideStringToString(fullExePath.filename().wstring());
-        fs::path currentPath = fullExePath.parent_path();
-
-        generatePlaylist(exeName, currentPath);
-    }
-    catch (const std::exception& e) {
-        std::string errorFileName = "error-" + getCurrentDateTime() + ".txt";
-        std::ofstream errorFile(errorFileName);
-        if (errorFile.is_open()) {
-            errorFile << "Error: " << e.what() << std::endl;
-            errorFile.close();
-        }
-        std::cerr << "An error occurred. Check " << errorFileName << " for details." << std::endl;
-        return 1;
-    }
-
-    return 0;
-}
 
 // quick super-simple check for illegal characters in proposed m3u filename
 std::string sanitiseFileName(const std::string& fileName) {
@@ -82,18 +59,21 @@ std::string getCurrentDateTime() {
     return ss.str();
 }
 
-void generatePlaylist(const std::string& exeName, const fs::path& currentPath) {
+std::string wideStringToString(const std::wstring& wstr) {
+    if (wstr.empty()) return std::string();
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
+    std::string strTo(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0], size_needed, NULL, NULL);
+    return strTo;
+}
+
+void generatePlaylist(const std::string& exeName, const fs::path& currentPath, bool& errorOccurred) {
     bool recursive = exeName.find("--R+") != std::string::npos;
     bool sortAlphabetically = exeName.find("--A+") != std::string::npos;
     bool sortByDateTime = exeName.find("--D+") != std::string::npos;
 
     std::map<fs::path, std::vector<fs::path>> fileGroups;
-    std::string errorFileName = "error-" + getCurrentDateTime() + ".txt";
-    std::ofstream errorFile(errorFileName, std::ios::out | std::ios::app);
-
-    if (!errorFile.is_open()) {
-        throw std::runtime_error("Unable to create error log file");
-    }
+    std::stringstream errorStream;
 
     // Collect files
     if (recursive) {
@@ -101,7 +81,8 @@ void generatePlaylist(const std::string& exeName, const fs::path& currentPath) {
             if (fs::is_regular_file(entry) && isAudioVideoFile(entry.path().extension().string())) {
                 std::string fileName = entry.path().filename().string();
                 if (!isValidMediaFileName(fileName)) {
-                    errorFile << "Warning: Skipping file with invalid name: " << fileName << std::endl;
+                    errorStream << "Warning: Skipping file with invalid name: " << fileName << std::endl;
+                    errorOccurred = true;
                     continue;
                 }
                 fileGroups[entry.path().parent_path()].push_back(entry.path());
@@ -113,7 +94,8 @@ void generatePlaylist(const std::string& exeName, const fs::path& currentPath) {
             if (fs::is_regular_file(entry) && isAudioVideoFile(entry.path().extension().string())) {
                 std::string fileName = entry.path().filename().string();
                 if (!isValidMediaFileName(fileName)) {
-                    errorFile << "Warning: Skipping file with invalid name: " << fileName << std::endl;
+                    errorStream << "Warning: Skipping file with invalid name: " << fileName << std::endl;
+                    errorOccurred = true;
                     continue;
                 }
                 fileGroups[currentPath].push_back(entry.path());
@@ -153,21 +135,67 @@ void generatePlaylist(const std::string& exeName, const fs::path& currentPath) {
                 playlist << relativePath << std::endl;
             }
             catch (const std::exception& e) {
-                errorFile << "Error calculating relative path for: " << file << ". " << e.what() << std::endl;
+                errorStream << "Error calculating relative path for: " << file << ". " << e.what() << std::endl;
+                errorOccurred = true;
             }
         }
     }
 
     playlist.close();
-    errorFile.close();
 
     std::cout << "Playlist generated: " << playlistName << std::endl;
+
+    if (errorOccurred) {
+        std::string errorContent = errorStream.str();
+        std::cout << "\nWarnings/Errors occurred:\n" << errorContent;
+
+        std::string errorFileName = "error-" + getCurrentDateTime() + ".txt";
+        std::ofstream errorFile(errorFileName);
+        if (errorFile.is_open()) {
+            errorFile << errorContent;
+            errorFile.close();
+            std::cout << "Detailed error log written to: " << errorFileName << std::endl;
+        }
+        else {
+            std::cerr << "Failed to create error log file." << std::endl;
+        }
+    }
 }
 
-std::string wideStringToString(const std::wstring& wstr) {
-    if (wstr.empty()) return std::string();
-    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
-    std::string strTo(size_needed, 0);
-    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0], size_needed, NULL, NULL);
-    return strTo;
+int main() {
+    try {
+        WCHAR exePath[MAX_PATH];
+        GetModuleFileNameW(NULL, exePath, MAX_PATH);
+        fs::path fullExePath(exePath);
+        std::string exeName = wideStringToString(fullExePath.filename().wstring());
+        fs::path currentPath = fullExePath.parent_path();
+
+        bool errorOccurred = false;
+        generatePlaylist(exeName, currentPath, errorOccurred);
+
+        if (errorOccurred) {
+            std::cout << "\nPress any key to exit...";
+            _getch(); // pause for user input - chance to review that error occured
+        }
+    }
+    catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+
+        std::string errorFileName = "error-" + getCurrentDateTime() + ".txt";
+        std::ofstream errorFile(errorFileName);
+        if (errorFile.is_open()) {
+            errorFile << "Fatal Error: " << e.what() << std::endl;
+            errorFile.close();
+            std::cerr << "Error details written to: " << errorFileName << std::endl;
+        }
+        else {
+            std::cerr << "Failed to create error log file." << std::endl;
+        }
+
+        std::cout << "Press any key to exit...";
+        _getch(); // pause for user input - aware of error
+        return 1;
+    }
+
+    return 0;
 }
